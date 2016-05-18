@@ -32,9 +32,9 @@ public class UserKernel extends ThreadedKernel {
 		freePages = new LinkedList<Integer>(); // linked list of PPN's - unload should add into this
 		pageListLock = new Lock();
 
-		// initialize linkedlist with all physical pages; index/element are equal and represent PPN
-		for(int i = 0; i < Processor.getNumPhysPages(); i++) {
-			freePages.add(i, (Integer) i);
+		// initialize linkedlist with all physical pages; element represents PPN
+		for(int i = 0; i < totalPhysPages; i++) {
+			freePages.add((Integer) i);
 		}
 
 		Machine.processor().setExceptionHandler(new Runnable() {
@@ -133,5 +133,5 @@ public class UserKernel extends ThreadedKernel {
 	public static Lock pageListLock;
 	public static int totalPhysPages;
 	public static int processCounter = 0;
-	public static HashMap<int, UserProcess> processMap;
+	//public static HashMap<int, UserProcess> processMap;
 }

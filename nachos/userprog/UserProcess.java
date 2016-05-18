@@ -134,14 +134,21 @@ public class UserProcess {
 	public int readVirtualMemory(int vaddr, byte[] data, int offset, int length) {
 		Lib.assertTrue(offset >= 0 && length >= 0
 				&& offset + length <= data.length);
-
 		byte[] memory = Machine.processor().getMemory();
 
-		// for now, just assume that virtual addresses equal physical addresses
 		if (vaddr < 0 || vaddr >= memory.length)
 			return 0;
 
-		int amount = Math.min(length, memory.length - vaddr);
+		int vpn = Processor.pageFromAddress(vaddr);
+		int addressOffset = Processor.offsetFromAddress(vaddr);
+
+		if(pageTable[vpn] == null || !pageTable[vpn].valid || vpn >= pageTable.length)
+			return 0;
+
+		int ppn = pageTable[vpn].ppn;
+		int paddr = pageSize * ppn + addressOffset;
+
+		int amount = Math.min(length, pageSize - addressOffset);
 		System.arraycopy(memory, vaddr, data, offset, amount);
 
 		return amount;
@@ -176,14 +183,21 @@ public class UserProcess {
 	public int writeVirtualMemory(int vaddr, byte[] data, int offset, int length) {
 		Lib.assertTrue(offset >= 0 && length >= 0
 				&& offset + length <= data.length);
-
 		byte[] memory = Machine.processor().getMemory();
 
-		// for now, just assume that virtual addresses equal physical addresses
 		if (vaddr < 0 || vaddr >= memory.length)
 			return 0;
 
-		int amount = Math.min(length, memory.length - vaddr);
+		int vpn = Processor.pageFromAddress(vaddr);
+		int addressOffset = Processor.offsetFromAddress(vaddr);
+
+		if(pageTable[vpn] == null || !pageTable[vpn].valid || vpn >= pageTable.length)
+			return 0;
+
+		int ppn = pageTable[vpn].ppn;
+		int paddr = pageSize * ppn + addressOffset;
+
+		int amount = Math.min(length, pageSize - addressOffset);
 		System.arraycopy(data, offset, memory, vaddr, amount);
 
 		return amount;
@@ -287,7 +301,7 @@ public class UserProcess {
 	 * @return <tt>true</tt> if the sections were successfully loaded.
 	 */
 	protected boolean loadSections() {
-		if (numPages > Machine.processor().getNumPhysPages()) {
+		if (numPages > UserKernel.freePages.size()) {
 			coff.close();
 			Lib.debug(dbgProcess, "\tinsufficient physical memory");
 			return false;
@@ -299,6 +313,8 @@ public class UserProcess {
 		boolean valid;
 		boolean readOnly;
 		
+		UserKernel.pageListLock.acquire();
+
 		// load sections
 		for (int s = 0; s < coff.getNumSections(); s++) {
 			CoffSection section = coff.getSection(s);
@@ -306,23 +322,25 @@ public class UserProcess {
 			Lib.debug(dbgProcess, "\tinitializing " + section.getName()
 					+ " section (" + section.getLength() + " pages)");
 
+			// allocate physical pages and fill in page table entry
 			for (int i = 0; i < section.getLength(); i++) {
 				vpn = section.getFirstVPN() + i;
 				ppn = (int) UserKernel.freePages.removeFirst();
-				// allocate physical pages and fill in page table entry
 
 				// load vpn into ppn
-				section.loadPage(vpn, ppn);
+				section.loadPage(i, ppn);
 				pageTable[vpn] = new TranslationEntry(vpn, ppn, true, 
 					section.isReadOnly(), false, false);
 			}
 		}
 
 		// create page entry for stack and arguments
-		for (int i = vpn; i < numPages; i++) {
+		for (int i = vpn; i < pageTable.length; i++) {
 			ppn = (int) UserKernel.freePages.removeFirst();
 			pageTable[i] = new TranslationEntry(i, ppn, true, false, false, false);
 		}
+
+		UserKernel.pageListLock.release();
 
 		return true;
 	}
@@ -330,11 +348,15 @@ public class UserProcess {
 	/**
 	 * Release any resources allocated by <tt>loadSections()</tt>.
 	 */
-	protected void unloadSections() {
-		for(int i = 0; i < numPages; i++) {
-			// put free pages back into memory
+	protected void unloadSections() {		
+		UserKernel.pageListLock.acquire();
+		
+		// put pages back into free memory
+		for(int i = 0; i < pageTable.length; i++) {
 			UserKernel.freePages.add((Integer) pageTable[i].ppn);
 		}
+
+		UserKernel.pageListLock.release();
 	}
 
 	/**
