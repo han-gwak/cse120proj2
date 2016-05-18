@@ -5,6 +5,7 @@ import nachos.threads.*;
 import nachos.userprog.*;
 
 import java.util.LinkedList;
+import java.util.HashMap;
 
 /**
  * A kernel that can support multiple user processes.
@@ -27,8 +28,14 @@ public class UserKernel extends ThreadedKernel {
 		console = new SynchConsole(Machine.console());
 
 		// initialize global list of free physical pages + lock
-		freePages = new LinkedList<Integer>();
+		totalPhysPages = Machine.processor().getNumPhysPages();
+		freePages = new LinkedList<Integer>(); // linked list of PPN's - unload should add into this
 		pageListLock = new Lock();
+
+		// initialize linkedlist with all physical pages; index/element are equal and represent PPN
+		for(int i = 0; i < Processor.getNumPhysPages(); i++) {
+			freePages.add(i, (Integer) i);
+		}
 
 		Machine.processor().setExceptionHandler(new Runnable() {
 			public void run() {
@@ -115,13 +122,16 @@ public class UserKernel extends ThreadedKernel {
 		super.terminate();
 	}
 
-	/** Globally accessible reference to list for free pages - use the page numbers */
-	public static LinkedList<Integer> freePages;
-	public static Lock pageListLock;
-
 	/** Globally accessible reference to the synchronized console. */
 	public static SynchConsole console;
 
 	// dummy variables to make javac smarter
 	private static Coff dummy1 = null;
+
+	// added variables below
+	public static LinkedList<Integer> freePages;
+	public static Lock pageListLock;
+	public static int totalPhysPages;
+	public static int processCounter = 0;
+	public static HashMap<int, UserProcess> processMap;
 }

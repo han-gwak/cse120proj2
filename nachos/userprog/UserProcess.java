@@ -23,16 +23,15 @@ public class UserProcess {
 	 * Allocate a new process.
 	 */
 	public UserProcess() {
-		int numPhysPages = Machine.processor().getNumPhysPages();
-		pageTable = new TranslationEntry[numPhysPages];
-		for (int i = 0; i < numPhysPages; i++)
-			pageTable[i] = new TranslationEntry(i, i, true, false, false, false);
+		pageTable = new TranslationEntry[numPages];
 
 		// initialize stdin and stdout for each process
 		fileTable = new OpenFile[maxOpenFiles];
 		fileTable[fdStandardInput] = UserKernel.console.openForReading();
 		fileTable[fdStandardOutput] = UserKernel.console.openForWriting();
 		filesOpen = minOpenFiles;
+
+		// increment UserKernel's processCounter and add to processMap
 	}
 
 	/**
@@ -254,6 +253,9 @@ public class UserProcess {
 		// and finally reserve 1 page for arguments
 		numPages++;
 
+		// initialize size of pageTable
+		pageTable = new TranslationEntry[numPages];
+
 		if (!loadSections())
 			return false;
 
@@ -291,6 +293,12 @@ public class UserProcess {
 			return false;
 		}
 
+		int vpn = 0;
+		int ppn = 0;
+		int lastVpn = 0;
+		boolean valid;
+		boolean readOnly;
+		
 		// load sections
 		for (int s = 0; s < coff.getNumSections(); s++) {
 			CoffSection section = coff.getSection(s);
@@ -299,11 +307,21 @@ public class UserProcess {
 					+ " section (" + section.getLength() + " pages)");
 
 			for (int i = 0; i < section.getLength(); i++) {
-				int vpn = section.getFirstVPN() + i;
+				vpn = section.getFirstVPN() + i;
+				ppn = (int) UserKernel.freePages.removeFirst();
+				// allocate physical pages and fill in page table entry
 
-				// for now, just assume virtual addresses=physical addresses
-				section.loadPage(i, vpn);
+				// load vpn into ppn
+				section.loadPage(vpn, ppn);
+				pageTable[vpn] = new TranslationEntry(vpn, ppn, true, 
+					section.isReadOnly(), false, false);
 			}
+		}
+
+		// create page entry for stack and arguments
+		for (int i = vpn; i < numPages; i++) {
+			ppn = (int) UserKernel.freePages.removeFirst();
+			pageTable[i] = new TranslationEntry(i, ppn, true, false, false, false);
 		}
 
 		return true;
@@ -313,6 +331,10 @@ public class UserProcess {
 	 * Release any resources allocated by <tt>loadSections()</tt>.
 	 */
 	protected void unloadSections() {
+		for(int i = 0; i < numPages; i++) {
+			// put free pages back into memory
+			UserKernel.freePages.add((Integer) pageTable[i].ppn);
+		}
 	}
 
 	/**
@@ -706,11 +728,6 @@ public class UserProcess {
 			Lib.assertNotReached("Unexpected exception");
 		}
 	}
-	/** Number of files currently open */
-	protected int filesOpen;
-
-	/** File table necessary in each process */
-	protected OpenFile[] fileTable;
 
 	/** The program being run by this process. */
 	protected Coff coff;
@@ -723,21 +740,22 @@ public class UserProcess {
 
 	/** The number of pages in the program's stack. */
 	protected final int stackPages = 8;
-	protected int stackPageStart;
 
 	private int initialPC, initialSP;
-
 	private int argc, argv;
-
 	private static final int pageSize = Processor.pageSize;
+	private static final char dbgProcess = 'a';
+
+	// all added variables below
+	protected int filesOpen; // number of files currently open
+	protected OpenFile[] fileTable; // indices 0 & 1 are streams; null indicates unused
+	protected int stackPageStart; // page index where stack starts
+	protected int pid; // process id set in UserKernel
 
 	private static final int bufSize = 1024;
-
 	private static final int fdStandardInput = 0;
 	private static final int fdStandardOutput = 1;
 	private static final int minOpenFiles = 2;
 	private static final int maxOpenFiles = 16;
-	private static final int maxNameLength = 256;
-
-	private static final char dbgProcess = 'a';
+	private static final int maxNameLength = 256;	
 }
