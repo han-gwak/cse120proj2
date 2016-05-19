@@ -5,6 +5,8 @@ import nachos.threads.*;
 import nachos.userprog.*;
 
 import java.io.EOFException;
+import java.lang.String;
+import java.nio.charset.StandardCharsets;
 
 /**
  * Encapsulates the state of a user process that is not contained in its user
@@ -23,8 +25,6 @@ public class UserProcess {
 	 * Allocate a new process.
 	 */
 	public UserProcess() {
-		pageTable = new TranslationEntry[numPages];
-
 		// initialize stdin and stdout for each process
 		fileTable = new OpenFile[maxOpenFiles];
 		fileTable[fdStandardInput] = UserKernel.console.openForReading();
@@ -139,17 +139,21 @@ public class UserProcess {
 		if (vaddr < 0 || vaddr >= memory.length)
 			return 0;
 
+		// get vpn and offset, check if valid
 		int vpn = Processor.pageFromAddress(vaddr);
 		int addressOffset = Processor.offsetFromAddress(vaddr);
-
-		if(pageTable[vpn] == null || !pageTable[vpn].valid || vpn >= pageTable.length)
+		if(vpn >= pageTable.length || pageTable[vpn] == null || 
+			!pageTable[vpn].valid || pageTable[vpn].readOnly)
 			return 0;
 
-		int ppn = pageTable[vpn].ppn;
-		int paddr = pageSize * ppn + addressOffset;
+		// get paddr from page table, check if valid
+		int paddr = pageSize * pageTable[vpn].ppn + addressOffset;
+		if(paddr < 0 || paddr >= memory.length)
+			return 0;
 
+		pageTable[vpn].used = true; // used but not written to		
 		int amount = Math.min(length, pageSize - addressOffset);
-		System.arraycopy(memory, vaddr, data, offset, amount);
+		System.arraycopy(memory, paddr, data, offset, amount);
 
 		return amount;
 	}
@@ -188,17 +192,22 @@ public class UserProcess {
 		if (vaddr < 0 || vaddr >= memory.length)
 			return 0;
 
+		// get vpn and offset, check if valid
 		int vpn = Processor.pageFromAddress(vaddr);
 		int addressOffset = Processor.offsetFromAddress(vaddr);
-
-		if(pageTable[vpn] == null || !pageTable[vpn].valid || vpn >= pageTable.length)
+		if(vpn >= pageTable.length || pageTable[vpn] == null || 
+			!pageTable[vpn].valid || pageTable[vpn].readOnly)
 			return 0;
 
-		int ppn = pageTable[vpn].ppn;
-		int paddr = pageSize * ppn + addressOffset;
+		// get paddr from page table, check if valid
+		int paddr = pageSize * pageTable[vpn].ppn + addressOffset;
+		if(paddr < 0 || paddr >= memory.length)
+			return 0;
 
-		int amount = Math.min(length, pageSize - addressOffset);
-		System.arraycopy(data, offset, memory, vaddr, amount);
+		pageTable[vpn].used = true;
+		pageTable[vpn].dirty = true;
+		int amount = Math.min(length, pageSize - addressOffset); // copy to end of physical page
+		System.arraycopy(data, offset, memory, paddr, amount);
 
 		return amount;
 	}
@@ -267,11 +276,16 @@ public class UserProcess {
 		// and finally reserve 1 page for arguments
 		numPages++;
 
-		// initialize size of pageTable
-		pageTable = new TranslationEntry[numPages];
-
 		if (!loadSections())
 			return false;
+
+		// initialize stack/argument pages and table
+		for (int i = numPages - stackPages - 1; i < numPages; i++) {
+			UserKernel.pageListLock.acquire();
+			int ppn = (int) UserKernel.freePages.removeFirst();
+			UserKernel.pageListLock.release();
+			pageTable[i] = new TranslationEntry(i, ppn, true, false, false, false);
+		}
 
 		// store arguments in last page
 		int entryOffset = (numPages - 1) * pageSize;
@@ -309,11 +323,9 @@ public class UserProcess {
 
 		int vpn = 0;
 		int ppn = 0;
-		int lastVpn = 0;
-		boolean valid;
-		boolean readOnly;
 		
-		UserKernel.pageListLock.acquire();
+		// initialize size of pageTable
+		pageTable = new TranslationEntry[numPages];
 
 		// load sections
 		for (int s = 0; s < coff.getNumSections(); s++) {
@@ -325,38 +337,30 @@ public class UserProcess {
 			// allocate physical pages and fill in page table entry
 			for (int i = 0; i < section.getLength(); i++) {
 				vpn = section.getFirstVPN() + i;
+				UserKernel.pageListLock.acquire();
 				ppn = (int) UserKernel.freePages.removeFirst();
-
-				// load vpn into ppn
+				UserKernel.pageListLock.release();
+				
+				// initialize translation entry in table
+				pageTable[vpn] = new TranslationEntry(vpn, ppn, true, section.isReadOnly(), false, false);
 				section.loadPage(i, ppn);
-				pageTable[vpn] = new TranslationEntry(vpn, ppn, true, 
-					section.isReadOnly(), false, false);
 			}
 		}
-
-		// create page entry for stack and arguments
-		for (int i = vpn; i < pageTable.length; i++) {
-			ppn = (int) UserKernel.freePages.removeFirst();
-			pageTable[i] = new TranslationEntry(i, ppn, true, false, false, false);
-		}
-
-		UserKernel.pageListLock.release();
-
 		return true;
 	}
 
 	/**
 	 * Release any resources allocated by <tt>loadSections()</tt>.
 	 */
-	protected void unloadSections() {		
-		UserKernel.pageListLock.acquire();
-		
+	protected void unloadSections() {
 		// put pages back into free memory
 		for(int i = 0; i < pageTable.length; i++) {
-			UserKernel.freePages.add((Integer) pageTable[i].ppn);
+			if(pageTable[i].valid) {
+				UserKernel.pageListLock.acquire();
+				UserKernel.freePages.add((Integer) pageTable[i].ppn);
+				UserKernel.pageListLock.release();
+			}
 		}
-
-		UserKernel.pageListLock.release();
 	}
 
 	/**
@@ -520,13 +524,20 @@ public class UserProcess {
 
 		// allocate buffer + other variables for reading
 		byte[] localBuffer = new byte[bufSize];
+		int readAmount = bufSize;
 		int bytesRead = 0;
 		int readResult = bufSize;
 		int writeResult = readResult;
 
+
 		// read page by page until count reached or bytes less than max bufSize read
 		while(bytesRead < count && readResult == bufSize) {
-			readResult = fileTable[fd].read(localBuffer, bytesRead, bufSize);
+			// if remaining amount less than bufsize change to remainder
+			if(count - bytesRead < bufSize) {
+				readAmount = count - bytesRead;
+			}
+
+			readResult = fileTable[fd].read(localBuffer, bytesRead, readAmount);
 			if(readResult == -1) { return -1; }
 
 			// write into inputted buffer
@@ -553,6 +564,7 @@ public class UserProcess {
 	 * if part of buffer invalid, or if stream terminated.
 	 */
 	private int handleWrite(int fd, int bufferAddress, int count) {
+
 		// error - fd or buffer address invalid
 		if(fd < 0 || fd >= maxOpenFiles || bufferAddress < 0 ||
 			(bufferAddress + count) > pageSize * numPages)
@@ -565,14 +577,18 @@ public class UserProcess {
 
 		// allocate buffer + other variables for writing
 		byte[] localBuffer = new byte[bufSize];
+		int readAmount = bufSize;
 		int bytesRead = 0;
-		int readResult = 0;
-		int writeResult = 0;
+		int readResult = bufSize;
+		int writeResult = readResult;
 
 		// read page by page until count reached or bytes less than max bufSize read
-		while(bytesRead < count || readResult != bufSize) {
+		while(bytesRead < count && readResult == bufSize) {
+			if(count - bytesRead < bufSize) {
+				readAmount = count - bytesRead;
+			}
 			readResult = readVirtualMemory(bufferAddress, localBuffer, 
-				bytesRead, bufSize);
+				bytesRead, readAmount);
 			if(readResult == -1) { return -1; }
 
 			// write into inputted buffer
@@ -704,6 +720,12 @@ public class UserProcess {
 		switch (syscall) {
 		case syscallHalt:
 			return handleHalt();
+		case syscallExit:
+			return 0;
+		case syscallJoin:
+			return 0;
+		case syscallExec:
+			return 0;
 		case syscallCreate:
 			return handleCreat(a0);
 		case syscallOpen:
